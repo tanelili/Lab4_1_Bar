@@ -1,0 +1,211 @@
+/*
+===============================================================================
+ Name        : main.c
+ Author      : $(author)
+ Version     :
+ Copyright   : $(copyright)
+ Description : main definition
+===============================================================================
+ */
+
+#if defined (__USE_LPCOPEN)
+#if defined(NO_BOARD_LIB)
+#include "chip.h"
+#else
+#include "board.h"
+#include "lcd_port.h"
+#include <cr_section_macros.h>
+#include "LiquidCrystal.h"
+#include <stdio.h>
+#include <inttypes.h>
+#include <string.h>
+#include <iostream>
+#include "BarGraph.h"
+
+volatile int counter = 0;
+volatile int ms = 0;
+using namespace std;
+
+#endif
+#endif
+
+#include <cr_section_macros.h>
+
+static volatile bool adcdone = false;
+static volatile bool adcstart = false;
+
+volatile uint32_t a0;
+volatile uint32_t d0;
+volatile uint32_t a3;
+volatile uint32_t d3;
+
+#define TICKRATE_HZ (10)	/* 10 ticks per second */
+volatile int kalib = 50; // Määrittää kalibrointirajan +-
+extern "C" {
+
+void SysTick_Handler(void)
+{
+	static uint32_t count;
+	adcstart = true;
+	count++;
+
+	if ( counter <= 0) {
+		counter = 1000;
+	}
+	if(counter > 0){
+		counter--;
+	}
+
+
+	// Sininen
+	if (d0 > d3) {
+		Board_LED_Set(0, false);
+		Board_LED_Set(1, false);
+
+		if (count >= ((d0-d3))/100){
+			Board_LED_Toggle(2);
+			count = 0;
+		}
+	}
+
+	// Punainen
+	if (d0 < d3) {
+		Board_LED_Set(2, false);
+		Board_LED_Set(1, false);
+
+		if (count >= ((d3-d0)/100)){
+			Board_LED_Toggle(0);
+			count = 0;
+		}
+
+	}
+
+	// Vihreä
+	if (d0 <= d3+kalib && d0 >= d3-kalib) {
+		Board_LED_Set(2, false);
+		Board_LED_Set(1, true);
+		Board_LED_Set(0, false);
+		count = 0;
+	}
+}
+
+void ADC0A_IRQHandler(void)
+{
+	uint32_t pending;
+
+	/* Get pending interrupts */
+	pending = Chip_ADC_GetFlags(LPC_ADC0);
+
+	/* Sequence A completion interrupt */
+	if (pending & ADC_FLAGS_SEQA_INT_MASK) {
+		adcdone = true; }
+
+	/* Clear any pending interrupts */
+	Chip_ADC_ClearFlags(LPC_ADC0, pending);
+}
+
+} // extern "C"
+
+void Sleep(int ms)
+{
+	counter = ms;
+	while (counter > 0) {
+		__WFI();
+	}
+}
+
+int main(void) {
+
+#if defined (__USE_LPCOPEN)
+	// Read clock settings and update SystemCoreClock variable
+	SystemCoreClockUpdate();
+#if !defined(NO_BOARD_LIB)
+	// Set up and initialize all required blocks and
+	// functions related to the board hardware
+	Board_Init();
+	// Set the LED to the state of "On"
+	//Board_LED_Set(1, true);
+
+#endif
+#endif
+
+	// TODO: insert code here
+	/* Setup ADC for 12-bit mode and normal power */
+	Chip_ADC_Init(LPC_ADC0, 0);
+
+	/* Setup for maximum ADC clock rate */
+	Chip_ADC_SetClockRate(LPC_ADC0, ADC_MAX_SAMPLE_RATE);
+
+	/* For ADC0, sequencer A will be used without threshold events.
+	   It will be triggered manually  */
+	Chip_ADC_SetupSequencer(LPC_ADC0, ADC_SEQA_IDX, (ADC_SEQ_CTRL_CHANSEL(0) | ADC_SEQ_CTRL_CHANSEL(3) | ADC_SEQ_CTRL_MODE_EOS));
+
+	/* For ADC0, select analog input pint for channel 0 on ADC0 */
+	Chip_ADC_SetADC0Input(LPC_ADC0, 0);
+
+	/* Use higher voltage trim for both ADC */
+	Chip_ADC_SetTrim(LPC_ADC0, ADC_TRIM_VRANGE_HIGHV);
+
+	/* Assign ADC0_0 to PIO1_8 via SWM (fixed pin) and ADC0_3 to PIO0_5 */
+	Chip_SWM_EnableFixedPin(SWM_FIXED_ADC0_0);
+	Chip_SWM_EnableFixedPin(SWM_FIXED_ADC0_3);
+
+	/* Need to do a calibration after initialization and trim */
+	Chip_ADC_StartCalibration(LPC_ADC0);
+	while (!(Chip_ADC_IsCalibrationDone(LPC_ADC0))) {}
+
+	/* Clear all pending interrupts and status flags */
+	Chip_ADC_ClearFlags(LPC_ADC0, Chip_ADC_GetFlags(LPC_ADC0));
+
+	/* Enable sequence A completion interrupts for ADC0 */
+	Chip_ADC_EnableInt(LPC_ADC0, ADC_INTEN_SEQA_ENABLE);
+
+	/* Enable related ADC NVIC interrupts */
+	NVIC_EnableIRQ(ADC0_SEQA_IRQn);
+
+	/* Enable sequencer */
+	Chip_ADC_EnableSequencer(LPC_ADC0, ADC_SEQA_IDX);
+
+	/* Configure systick timer */
+	SysTick_Config(Chip_Clock_GetSysTickClockRate() / TICKRATE_HZ);
+
+	LiquidCrystal meth(8, 9, 10, 11, 12, 13);
+	meth.begin(16,2);
+	meth.setCursor(0,0);
+
+	BarGraph meta(meth, 10, false);
+	//meth.print("World is on fire");
+	meta.draw(5);
+
+	while(1) {
+		while(!adcstart) __WFI();
+		adcstart = false;
+
+		Chip_ADC_StartSequencer(LPC_ADC0, ADC_SEQA_IDX);
+		while(!adcdone) __WFI();
+		adcdone = false;
+
+		a0 = Chip_ADC_GetDataReg(LPC_ADC0, 0);
+		d0 = ADC_DR_RESULT(a0);
+		a3 = Chip_ADC_GetDataReg(LPC_ADC0, 3);
+		d3 = ADC_DR_RESULT(a3);
+		// Uncommend the lower line to print values in to terminal ( semihosting must be enabled )
+
+
+
+		//sprintf(str,"");
+		//char* teksti = str; //Hiukan liian raskas vakiomerkkitulostukseen, tee se toinen printti
+
+		//meth.print(teksti);
+		//("a0 = %08X, a1 = %08X, d0 = %d, d1 = %d\n", a0, a3, d0, d3);
+	}
+
+	// Force the counter to be placed into memory
+	volatile static int i = 0 ;
+	// Enter an infinite loop, just incrementing a counter
+	while(1) {
+		i++ ;
+	}
+
+	return 0 ;
+}
