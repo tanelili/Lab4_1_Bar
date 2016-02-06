@@ -16,7 +16,7 @@
 
     // TODO: insert code here
     Chip_RIT_Init(LPC_RITIMER);
-    LiquidCrystal lcd(8, 9, 10, 11, 12, 13);
+    Liquid Crystal lcd(8, 9, 10, 11, 12, 13);
 
     lcd.begin(16,2);
     lcd.setCursor(0,0);
